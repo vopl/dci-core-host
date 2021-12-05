@@ -12,11 +12,13 @@
 #include <dci/host.hpp>
 #include <dci/cmt.hpp>
 #include <dci/utils/atScopeExit.hpp>
+#include <dci/utils/b2h.hpp>
 #include <dci/exception.hpp>
 #include <dci/aup/instance/setup.hpp>
 #include <dci/aup/instance/io.hpp>
 #include <dci/aup/instance/notifiers.hpp>
 #include <dci/poll/functions.hpp>
+#include <dci/poll/awaker.hpp>
 #include <dci/sbs.hpp>
 #include <dci/mm.hpp>
 #include <dci/integration/info.hpp>
@@ -25,9 +27,17 @@
 #include <csignal>
 
 #include <boost/stacktrace.hpp>
-//#include <chrono>
-#include <link.h>
-//#include <fstream>
+
+#if __has_include(<link.h>)
+#   include <link.h>
+#endif
+
+#ifdef _WIN32
+#   include <windows.h>
+#   include <psapi.h>
+#   include <dbghelp.h>
+#   include <winnt.h>
+#endif
 
 namespace fs = std::filesystem;
 namespace po = boost::program_options;
@@ -50,17 +60,19 @@ auto tryCatch(const std::string& name, auto&& f, auto&& back)
 
 namespace
 {
-    Manager *   manager {nullptr};
-    bool        aupApplied {false};
-    fs::path    executablePath;
-    std::size_t stopsCount {};
-    bool        stopInitiated {};
+    Manager *           manager {nullptr};
+    bool                aupApplied {false};
+    fs::path            executablePath;
+    std::size_t         stopsCount {};
+    bool                stopInitiated {};
+    dci::poll::Awaker*  pollAwaker{};
 }
 
 /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
 static void dumpStacks()
 {
     //TODO:  async-safe
+    std::cout << "dumpStack to /tmp/dump2" << std::endl;
     std::ofstream out{"/tmp/dump2"};
 
     if(!out)
@@ -77,10 +89,87 @@ static void dumpStacks()
     out << "compilerOptimization: " << dci::integration::info::compilerOptimization() << '\n';
     out << "provider            : " << dci::integration::info::provider() << '\n';
 
+#ifdef _WIN32
+    out << "modules" << std::endl;
+    std::vector<HMODULE> hMods;
+    hMods.resize(32);
+    DWORD cbNeeded = 0;
+    HANDLE hProcess = GetCurrentProcess();
+    while(EnumProcessModules(hProcess, hMods.data(), hMods.size()*sizeof(HMODULE), &cbNeeded) && cbNeeded > hMods.size()*sizeof(HMODULE))
+    {
+        hMods.resize(cbNeeded/sizeof(HMODULE));
+    }
+
+    for(DWORD i{}; i < (cbNeeded/sizeof(HMODULE)); i++)
+    {
+        fs::path modName;
+        WCHAR szModName[MAX_PATH];
+
+        if(GetModuleFileNameExW(hProcess, hMods[i], szModName, sizeof(szModName) / sizeof(WCHAR)))
+        {
+            modName = fs::path{szModName};
+        }
+
+        ///////////////////////////////////////////////
+        out << reinterpret_cast<const void*>(hMods[i]) << " " << modName.string();
+
+        bool idFetched = false;
+        if(!idFetched)
+        {
+            const char *image = (const char *)hMods[i];
+            IMAGE_DOS_HEADER* dosHeader = (IMAGE_DOS_HEADER*)image;
+            IMAGE_NT_HEADERS* ntHeaders = (IMAGE_NT_HEADERS*)&image[dosHeader->e_lfanew];
+            for(WORD sectionIndex{}; sectionIndex < ntHeaders->FileHeader.NumberOfSections; ++sectionIndex)
+            {
+                IMAGE_SECTION_HEADER* section = (IMAGE_SECTION_HEADER*)&image[dosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS) + sectionIndex*sizeof(IMAGE_SECTION_HEADER)];
+                if(section->Misc.VirtualSize < 48)
+                {
+                    continue;
+                }
+
+                if(strncmp((const char*)&section->Name[0], ".buildid", IMAGE_SIZEOF_SHORT_NAME))
+                {
+                    continue;
+                }
+
+                const dci::uint32 type = *(const dci::uint32*)&image[section->VirtualAddress + 28];
+                if(0x53445352 != type)//RSDS
+                {
+                    continue;
+                }
+
+                const dci::byte* hash = (const dci::byte*)&image[section->VirtualAddress + 32];
+                out << " gnu:";
+                out << dci::utils::b2h(hash+0, 4, dci::utils::HexEndian::big);
+                out << dci::utils::b2h(hash+4, 2, dci::utils::HexEndian::big);
+                out << dci::utils::b2h(hash+6, 2, dci::utils::HexEndian::big);
+                out << dci::utils::b2h(hash+8, 8, dci::utils::HexEndian::middle);
+                idFetched = true;
+                break;
+            }
+        }
+
+        if(!idFetched)
+        {
+            SYMSRV_INDEX_INFOW info{};
+            info.sizeofstruct = sizeof(info);
+            if(SymSrvGetFileIndexInfoW(szModName, &info, 0))
+            {
+                out << " ms:";
+                char buf[64];
+                std::sprintf(buf, "%lx%lx", info.timestamp, info.size);
+                out << buf;
+                idFetched = true;
+            }
+        }
+        out << std::endl;
+    }
+#else
     out << "shared objects" << std::endl;
     {
         dl_iterate_phdr([](struct dl_phdr_info *info, size_t /*size*/, void *data) -> int
         {
+            ///////////////////////////////////////////////
             const char *soName = info->dlpi_name;
             char exe[PATH_MAX];
             if(!soName || !soName[0])
@@ -93,17 +182,67 @@ static void dumpStacks()
                 }
             }
 
+            ///////////////////////////////////////////////
+            struct BuildIdNote
+            {
+                ElfW(Nhdr)  _nhdr;
+                char        _name[4];
+                uint8_t     _data[1];
+            };
+            BuildIdNote* buildIdNote{};
+
+            for(std::size_t i{}; i < info->dlpi_phnum; ++i)
+            {
+                if(PT_NOTE != info->dlpi_phdr[i].p_type)
+                {
+                    continue;
+                }
+
+                BuildIdNote* note = (BuildIdNote*)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+                std::size_t len = info->dlpi_phdr[i].p_filesz;
+
+                while(len >= sizeof(BuildIdNote))
+                {
+                    if (note->_nhdr.n_type == NT_GNU_BUILD_ID &&
+                        note->_nhdr.n_descsz != 0 &&
+                        note->_nhdr.n_namesz == 4 &&
+                        memcmp(note->_name, "GNU", 4) == 0)
+                    {
+                        buildIdNote = note;
+                        break;
+                    }
+
+                    auto align = [](std::size_t val, std::size_t align)
+                    {
+                        return (((val) + (align) - 1) & ~((align) - 1));
+                    };
+
+                    std::size_t offset = sizeof(ElfW(Nhdr)) +
+                                    align(note->_nhdr.n_namesz, 4) +
+                                    align(note->_nhdr.n_descsz, 4);
+                    note = (BuildIdNote*)((char*)note + offset);
+                    len -= offset;
+                }
+            }
+
+            ///////////////////////////////////////////////
             std::ofstream& out = *static_cast<std::ofstream*>(data);
-            out << reinterpret_cast<const void*>(info->dlpi_addr) << " " << soName << std::endl;
+            out << reinterpret_cast<const void*>(info->dlpi_addr) << " " << soName;
+            if(buildIdNote)
+            {
+                out << " " << dci::utils::b2h(buildIdNote->_data, buildIdNote->_nhdr.n_descsz, dci::utils::HexEndian::middle);
+            }
+            out << std::endl;
             return 0;
         }, &out);
     }
+#endif
 
     dci::cmt::enumerateFibers([](dci::cmt::task::State state, void *data)
     {
         std::ofstream& out = *static_cast<std::ofstream*>(data);
 
-        out << "fiber[";
+        out << "ctx[";
         switch(state)
         {
         case dci::cmt::task::State::null : out << "null" ; break;
@@ -134,24 +273,40 @@ static void signalHandler(int signum)
     {
     case SIGINT:
     case SIGTERM:
+#ifdef SIGQUIT
     case SIGQUIT:
+#endif
+#ifdef SIGTSTP
     case SIGTSTP:
+#endif
         if(++stopsCount >= std::size_t{3} || !manager)
         {
             dumpStacks();
+#ifdef _WIN32
+            ::TerminateProcess(GetCurrentProcess(), EXIT_FAILURE);
+#else
             _exit(EXIT_FAILURE);
+#endif
         }
 
-        manager->interrupt();
+        if(pollAwaker)
+        {
+            pollAwaker->wakeup();
+        }
         break;
 
+#ifdef SIGUSR1
     case SIGUSR1:
         dumpStacks();
         break;
-
+#endif
     default:
         dumpStacks();
+#ifdef _WIN32
+        ::TerminateProcess(GetCurrentProcess(), EXIT_FAILURE);
+#else
         _exit(EXIT_FAILURE);
+#endif
     }
 }
 
@@ -160,7 +315,7 @@ static int restartAfterAupApplied(std::vector<std::string> argv)
 {
     LOGI("restart because of aup");
 
-    argv[0] = executablePath;
+    argv[0] = executablePath.string();
 
     std::vector<char*> c_argv;
     c_argv.reserve(argv.size()+1);
@@ -217,9 +372,15 @@ int main(int c_argc, char* c_argv[])
     //setup signals
     signal(SIGINT,  signalHandler);
     signal(SIGTERM, signalHandler);
+#ifdef SIGQUIT
     signal(SIGQUIT, signalHandler);
+#endif
+#ifdef SIGTSTP
     signal(SIGTSTP, signalHandler);
+#endif
+#ifdef SIGUSR1
     signal(SIGUSR1, signalHandler);
+#endif
     dci::mm::setupPanicHandler(signalHandler);
 
     //formalize args
@@ -358,10 +519,7 @@ int main(int c_argc, char* c_argv[])
             tryCatch("executeTest",
                 [&]{
                     int res = Manager::executeTest(argv, testStage);
-                    if(EXIT_SUCCESS != res)
-                    {
-                        exit(res);
-                    }
+                    exit(res);
                 },
                 []{
                     exit(EXIT_FAILURE);
@@ -491,7 +649,6 @@ int main(int c_argc, char* c_argv[])
 
     int processResultCode = EXIT_SUCCESS;
 
-    dci::sbs::Wire<> pollerStarted;
     dci::sbs::Wire<> modulesStarted;
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -499,30 +656,12 @@ int main(int c_argc, char* c_argv[])
     {
         manager = new Manager;
 
-        dci::sbs::Owner interruptOwner;
-        manager->onInterrupted() += interruptOwner * [&]
-        {
-            if(stopsCount)
-            {
-                if(!stopInitiated)
-                {
-                    stopInitiated = true;
-                    LOGI("stop manager");
-                    manager->stop();
-                }
-                else
-                {
-                    LOGI("await previous stopping");
-                }
-            }
-        };
-
-
         dci::utils::AtScopeExit se{[=]
         {
             delete std::exchange(manager, nullptr);
         }};
 
+        dci::sbs::Owner testRunnerOwner;
         auto testRunner = [&]()
         {
             manager->runTest(argv, testStage).then() += [&](auto in)
@@ -547,7 +686,7 @@ int main(int c_argc, char* c_argv[])
 
         if(TestStage::mnone == testStage)
         {
-            pollerStarted.out() += testRunner;
+            dci::poll::started() += testRunner;
         }
 
         if(TestStage::mstart == testStage)
@@ -595,7 +734,29 @@ int main(int c_argc, char* c_argv[])
             };
         }
 
-        pollerStarted.out() += [&]
+        dci::sbs::Owner pollAwakerOwner;
+        dci::poll::Awaker pollAwakerInstance{false};
+        pollAwaker = &pollAwakerInstance;
+        dci::utils::AtScopeExit cleaner{[&]{pollAwaker = nullptr;}};
+
+        pollAwaker->woken() += pollAwakerOwner * [&]
+        {
+            if(stopsCount)
+            {
+                if(!stopInitiated)
+                {
+                    stopInitiated = true;
+                    LOGI("stop manager");
+                    manager->stop();
+                }
+                else
+                {
+                    LOGI("await previous stopping");
+                }
+            }
+        };
+
+        dci::poll::started() += [&]
         {
             std::vector<std::string> modules = vars["module"].as<std::vector<std::string>>();
             std::set<std::string> modulesSet{std::make_move_iterator(modules.begin()), std::make_move_iterator(modules.end())};
@@ -611,11 +772,6 @@ int main(int c_argc, char* c_argv[])
             {
                 manager->stop();
             }
-        };
-
-        spawn() += [&]
-        {
-            pollerStarted.in();
         };
 
         tryCatch("run",

@@ -17,7 +17,7 @@
 #include <dci/test/entryPoint.hpp>
 #include <dci/utils/atScopeExit.hpp>
 #include <dci/utils/fnmatch.hpp>
-
+#include "../dll.hpp"
 #include "idl-host.hpp"
 
 #include <cstdlib>
@@ -25,7 +25,9 @@
 #include <vector>
 #include <filesystem>
 
-#include <dlfcn.h>
+#if __has_include(<dlfcn.h>)
+#   include <dlfcn.h>
+#endif
 
 #include <boost/property_tree/ptree.hpp>
 
@@ -78,15 +80,18 @@ namespace dci::host::impl
         {
             if(!de.is_regular_file()) continue;
 
-            std::string fname = de.path().stem();
+            std::string fname = de.path().stem().string();
             if(!ends_with(fname, "-"+stageStr)) continue;
 
-            fname = fs::absolute(de.path()).native();
+            fname = fs::absolute(de.path()).string();
 
-            void* hm = dlopen(fname.c_str(), RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
-            if(!hm)
+            try
             {
-                throw exception::TestFail(std::string("unable to load test module ")+fname+", "+dlerror());
+                dll(fname);
+            }
+            catch(const std::runtime_error& e)
+            {
+                throw exception::TestFail(std::string("unable to load test module ")+fname+", "+e.what());
             }
         }
 
@@ -155,35 +160,23 @@ namespace dci::host::impl
 
         _workState = WorkState::started;
 
-        auto pollRun = [&]
         {
-            sbs::Owner onWorkPossibleOwner;
-            poll::onWorkPossible() += onWorkPossibleOwner * [&]
+            sbs::Owner workPossibleOwner;
+            poll::workPossible() += workPossibleOwner * [&]
             {
-                while(_interrupt)
-                {
-                    --_interrupt;
-                    _onInterrupted.in();
-                }
-
                 cmt::executeReadyFibers();
             };
 
-            return poll::run();
-        };
-
-        {
-            std::error_code ec = pollRun();
-            if(ec)
+            if(std::error_code ec = poll::run())
             {
                 throw exception::RunFail("unable to run poller: "+ec.message());
             }
-        }
 
-        if(WorkState::started == _workState)
-        {
-            stop();
-            pollRun();
+            if(WorkState::started == _workState)
+            {
+                stop();
+                poll::run(false);
+            }
         }
 
         {
@@ -193,63 +186,6 @@ namespace dci::host::impl
                 LOGW("poll deinitialize: "<<ec.message());
             }
         }
-    }
-
-    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    void Manager::interrupt()
-    {
-        ++_interrupt;
-        poll::interrupt();
-    }
-
-    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    sbs::Signal<> Manager::onInterrupted()
-    {
-        return _onInterrupted.out();
-    }
-
-    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    bool Manager::startModules(std::set<std::string>&& byNames, std::set<std::string>&& byServices)
-    {
-        std::vector<Module*> selected;
-
-        const auto match = [](const std::set<std::string>& patterns, const std::string& value)
-        {
-            for(const std::string& pattern : patterns)
-            {
-                if(!pattern.empty() && !value.empty() && utils::fnmatch(pattern.c_str(), value.c_str()))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        };
-
-        for(const ModulePtr& module : _modules)
-        {
-            const module::Manifest& manifest = module->manifest();
-
-            if(match(byNames, manifest._name))
-            {
-                selected.emplace_back(module.get());
-                continue;
-            }
-
-            for(const module::Manifest::ServiceId& serviceId : manifest._serviceIds)
-            {
-                if(byServices.contains(serviceId._iid.toText()) || match(byServices, serviceId._alias))
-                {
-                    selected.emplace_back(module.get());
-                    break;
-                }
-            }
-        }
-
-        return massModulesOperation(selected, "startModule", [](Module* m)
-        {
-            return m->start();
-        });
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
@@ -308,6 +244,50 @@ namespace dci::host::impl
             }
 
         };
+    }
+
+    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
+    bool Manager::startModules(std::set<std::string>&& byNames, std::set<std::string>&& byServices)
+    {
+        std::vector<Module*> selected;
+
+        const auto match = [](const std::set<std::string>& patterns, const std::string& value)
+        {
+            for(const std::string& pattern : patterns)
+            {
+                if(!pattern.empty() && !value.empty() && utils::fnmatch(pattern.c_str(), value.c_str()))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        for(const ModulePtr& module : _modules)
+        {
+            const module::Manifest& manifest = module->manifest();
+
+            if(match(byNames, manifest._name))
+            {
+                selected.emplace_back(module.get());
+                continue;
+            }
+
+            for(const module::Manifest::ServiceId& serviceId : manifest._serviceIds)
+            {
+                if(byServices.contains(serviceId._iid.toText()) || match(byServices, serviceId._alias))
+                {
+                    selected.emplace_back(module.get());
+                    break;
+                }
+            }
+        }
+
+        return massModulesOperation(selected, "startModule", [](Module* m)
+        {
+            return m->start();
+        });
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
@@ -477,6 +457,12 @@ namespace dci::host::impl
     bool Manager::initializeModules()
     {
         fs::path modulesDir = fs::current_path() / "../module";
+
+        if(!fs::exists(modulesDir))
+        {
+            LOGE("modules initialization: modules directory is absent");
+            return false;
+        }
 
         try
         {

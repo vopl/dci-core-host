@@ -20,7 +20,7 @@ namespace dci::host::impl
     class Module
     {
     public:
-        static const module::Manifest& manifest(const std::string& mainBinaryFullPath);
+        static const module::Manifest& manifest(const std::string& mainBinaryPath);
 
     public:
         Module(Manager* manager, const std::filesystem::path& manifestFile);
@@ -42,11 +42,10 @@ namespace dci::host::impl
         cmt::Future<idl::Interface> createService(idl::ILid ilid);
 
     private:
-        Manager *               _manager;
-        std::filesystem::path   _manifestFile;
-        module::Manifest        _manifest;
-        void *                  _mainBinaryHandle = nullptr;
-        module::Entry *         _entry = nullptr;
+        Manager *                   _manager;
+        std::filesystem::path       _manifestFile;
+        module::Manifest            _manifest;
+        module::Entry *             _entry = nullptr;
 
         enum class State
         {

@@ -36,12 +36,9 @@ namespace dci::host
         ~Manager();
 
         void run();//блокирующий
-        void interrupt();
-        sbs::Signal<> onInterrupted();
+        void stop();//запрос на выход из run
 
         bool startModules(std::set<std::string>&& byNames, std::set<std::string>&& byServices);
-
-        void stop();//запрос на выход из run
 
         cmt::Future<int> runTest(const std::vector<std::string>& argv, TestStage stage);
         cmt::Future<> runDaemon(const std::vector<std::string>& argv);

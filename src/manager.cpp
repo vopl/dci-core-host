@@ -42,27 +42,15 @@ namespace dci::host
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    void Manager::interrupt()
+    void Manager::stop()
     {
-        return impl().interrupt();
-    }
-
-    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    sbs::Signal<> Manager::onInterrupted()
-    {
-        return impl().onInterrupted();
+        return impl().stop();
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
     bool Manager::startModules(std::set<std::string> &&modules, std::set<std::string> &&services)
     {
         return impl().startModules(std::move(modules), std::move(services));
-    }
-
-    /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    void Manager::stop()
-    {
-        return impl().stop();
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7

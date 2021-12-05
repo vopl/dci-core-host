@@ -11,12 +11,15 @@ file(GLOB_RECURSE SRC src/*)
 file(GLOB_RECURSE IDL idl/*)
 file(GLOB_RECURSE CMM cmakeModules/*)
 
-############################################################
-add_library(${UNAME} SHARED ${INC} ${SRC} ${IDL} ${CMM})
-dciIntegrationSetupTarget(${UNAME})
-#target_include_directories(${UNAME} PRIVATE src)
+list(FILTER SRC EXCLUDE REGEX ".*main.cpp$")
 
-target_link_libraries(${UNAME} PRIVATE
+############################################################
+add_library(${UNAME}-lib SHARED ${INC} ${SRC} ${IDL} ${CMM})
+set_target_properties(${UNAME}-lib PROPERTIES OUTPUT_NAME ${UNAME})
+dciIntegrationSetupTarget(${UNAME}-lib)
+#target_include_directories(${UNAME}-lib PRIVATE src)
+
+target_link_libraries(${UNAME}-lib PRIVATE
 #    himpl
     mm
     cmt
@@ -29,15 +32,19 @@ target_link_libraries(${UNAME} PRIVATE
     config
     stiac
     exception
+    logger
 )
 
-target_link_libraries(${UNAME} PRIVATE
-    dl
-    boost_program_options)
+if(UNIX)
+    target_link_libraries(${UNAME}-lib PRIVATE dl)
+endif()
+
+find_package(Boost REQUIRED COMPONENTS program_options filesystem)
+target_link_libraries(${UNAME}-lib PRIVATE Boost::program_options Boost::filesystem)
 
 ############################################################
 include(dciHimpl)
-dciHimplMakeLayouts(${UNAME}
+dciHimplMakeLayouts(${UNAME}-lib
     INCLUDE
         src
 
@@ -53,7 +60,7 @@ dciHimplMakeLayouts(${UNAME}
 
 ##############################################################
 include(dciIdl)
-dciIdl(${UNAME} cpp
+dciIdl(${UNAME}-lib cpp
     INCLUDE ${DCI_IDL_DIRS}
     SOURCES host.idl
     OPTIONS --cpp-stiac-support --cpp-stiac-support-filter "^dci::idl::gen::host::"
@@ -61,11 +68,10 @@ dciIdl(${UNAME} cpp
 )
 
 ################################################################
-add_executable(${UNAME}-executable src-executable/main.cpp)
-dciIntegrationSetupTarget(${UNAME}-executable)
-set_target_properties(${UNAME}-executable PROPERTIES OUTPUT_NAME ${UNAME})
-target_link_libraries(${UNAME}-executable PRIVATE
-    ${UNAME}
+add_executable(${UNAME} src/main.cpp)
+dciIntegrationSetupTarget(${UNAME})
+target_link_libraries(${UNAME} PRIVATE
+    ${UNAME}-lib
     mm
     cmt
     sbs
@@ -73,10 +79,15 @@ target_link_libraries(${UNAME}-executable PRIVATE
     aup
     poll
     integration
-    boost_program_options
+    logger
+    Boost::program_options
 )
 
+if(WIN32)
+    target_link_libraries(${UNAME} PRIVATE Dbghelp.lib)
+endif()
+
 ############################################################
-add_test(NAME noenv COMMAND ${UNAME}-executable --test noenv)
-add_test(NAME mnone COMMAND ${UNAME}-executable --test mnone)
-add_test(NAME mstart COMMAND ${UNAME}-executable --test mstart)
+add_test(NAME noenv COMMAND ${UNAME} --test noenv)
+add_test(NAME mnone COMMAND ${UNAME} --test mnone)
+add_test(NAME mstart COMMAND ${UNAME} --test mstart)

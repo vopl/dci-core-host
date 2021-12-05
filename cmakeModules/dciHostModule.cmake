@@ -14,7 +14,7 @@ function(dciHostModule uname)
     ######################
     dciIntegrationSetupTarget(${target} MODULE)
     target_link_libraries(${target} PRIVATE
-        host
+        host-lib
         stiac
         idl
         bytes
@@ -25,15 +25,16 @@ function(dciHostModule uname)
         poll
         utils
         logger)
-    add_dependencies(${target} host-executable)
+    add_dependencies(${target} host)
 
     get_target_property(outDir ${target} LIBRARY_OUTPUT_DIRECTORY)
     set(manifest ${outDir}/${mname}.manifest)
 
+    file(RELATIVE_PATH path4Comment ${CMAKE_BINARY_DIR} ${manifest})
     add_custom_command(OUTPUT ${manifest}
-        COMMAND host-executable --genmanifest $<TARGET_FILE:${target}> --outfile ${manifest}
-        DEPENDS ${target} ${OPTS_IMPLTARGETS} host-executable
-        COMMENT "Generating ${manifest}")
+        COMMAND host-cmd --genmanifest $<TARGET_FILE:${target}> --outfile ${manifest}
+        DEPENDS ${target} ${OPTS_IMPLTARGETS} host host-cmd
+        COMMENT "Generating ${path4Comment}")
 
     add_custom_target(${target}-manifest ALL SOURCES ${manifest})
 

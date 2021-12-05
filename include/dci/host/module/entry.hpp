@@ -68,7 +68,7 @@ namespace dci::host::module
             return idl::Interface();
         }
 
-        Srv* srv = new Srv(std::forward<decltype(args)>(args)...);
+        Srv* srv = new Srv{std::forward<decltype(args)>(args)...};
         srv->involvedChanged() += srv->sol() * [srv](bool v)
         {
             if(!v)

@@ -11,11 +11,7 @@
 #include <dci/host/module/entry.hpp>
 #include <dci/host/manager.hpp>
 #include <dci/logger.hpp>
-
-#include <string>
-#include <filesystem>
-
-#include <dlfcn.h>
+#include "../dll.hpp"
 
 namespace dci::host::impl
 {
@@ -27,30 +23,27 @@ namespace dci::host::impl
     }
 
     /////////0/////////1/////////2/////////3/////////4/////////5/////////6/////////7
-    const module::Manifest& Module::manifest(const std::string& mainBinaryFullPath)
+    const module::Manifest& Module::manifest(const std::string& mainBinaryPath)
     {
-        void* mainBinaryHandle = dlopen(mainBinaryFullPath.c_str(), RTLD_LAZY|RTLD_LOCAL);
-
-        if(!mainBinaryHandle)
+        boost::dll::shared_library* sl;
+        try
         {
-            LOGE(dlerror());
+            sl = &dll(mainBinaryPath);
+        }
+        catch(const std::runtime_error& e)
+        {
+            LOGE("loading module "<<mainBinaryPath<<": " << e.what());
             return badModuleManifest;
         }
 
-        void **ppe = static_cast<void **>(dlsym(mainBinaryHandle, "dciModuleEntry"));
-        if(!ppe)
+        module::Entry* entry{};
+        try
         {
-            dlclose(mainBinaryHandle);
-            LOGE("loading module "<<mainBinaryFullPath<<": entry point is absent");
-            return badModuleManifest;
+            entry = sl->get<module::Entry*>("dciModuleEntry");
         }
-
-        module::Entry* entry = static_cast<module::Entry*>(*ppe);
-
-        if(!entry)
+        catch(const std::runtime_error& e)
         {
-            dlclose(mainBinaryHandle);
-            LOGE("loading module "<<mainBinaryFullPath<<": entry point is damaged");
+            LOGE("loading module "<<mainBinaryPath<<": entry point is absent, " << e.what());
             return badModuleManifest;
         }
 
@@ -100,7 +93,7 @@ namespace dci::host::impl
         case State::stopping:       return true;
         }
 
-        if(!_manifest.fromConfFile(_manifestFile))
+        if(!_manifest.fromConfFile(_manifestFile.string()))
         {
             _state = State::attachError;
             LOGE("unable to load module manifest");
@@ -160,31 +153,27 @@ namespace dci::host::impl
 
         fs::path mainBinaryPath = _manifestFile.parent_path()/_manifest._mainBinary;
 
-        dbgAssert(!_mainBinaryHandle);
-        _mainBinaryHandle = dlopen(mainBinaryPath.string().c_str(), RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
-
-        if(!_mainBinaryHandle)
+        boost::dll::shared_library* sl;
+        try
         {
-            LOGE("loading module \""<<_manifest._name<<"\" binary: "<<dlerror());
+            sl = &dll(mainBinaryPath.string());
+        }
+        catch(const std::runtime_error& e)
+        {
+            LOGE("loading module \""<<_manifest._name<<"\" binary: "<<e.what());
             _state = State::loadError;
             return false;
         }
 
         dbgAssert(!_entry);
 
-        void **ppe = static_cast<void **>(dlsym(_mainBinaryHandle, "dciModuleEntry"));
-        if(!ppe)
+        try
         {
-            LOGE("loading module \""<<_manifest._name<<"\": entry point is absent");
-            _state = State::loadError;
-            return false;
+            _entry = sl->get<module::Entry*>("dciModuleEntry");
         }
-
-        _entry = static_cast<module::Entry*>(*ppe);
-
-        if(!_entry)
+        catch(const std::runtime_error& e)
         {
-            LOGE("loading module \""<<_manifest._name<<"\": entry point is damaged");
+            LOGE("loading module "<<mainBinaryPath<<": entry point is absent, " << e.what());
             _state = State::loadError;
             return false;
         }
@@ -195,9 +184,7 @@ namespace dci::host::impl
 
             _entry  = nullptr;
 
-            dbgAssert(_mainBinaryHandle);
-            dlclose(_mainBinaryHandle);
-            _mainBinaryHandle = nullptr;
+            sl->unload();
 
             _state = State::loadError;
             return false;
@@ -240,13 +227,6 @@ namespace dci::host::impl
         }
 
         _entry  = nullptr;
-
-        if(_mainBinaryHandle)
-        {
-            dlclose(_mainBinaryHandle);
-            _mainBinaryHandle = nullptr;
-        }
-
         _state = State::attached;
 
         return true;
