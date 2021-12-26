@@ -410,7 +410,7 @@ int main(int c_argc, char* c_argv[])
             (
                 "outfile",
                 po::value<std::string>(),
-                "output file name for genmanifest, rndsign"
+                "output file name for genmanifest"
             )
             (
                 "module",
@@ -420,7 +420,7 @@ int main(int c_argc, char* c_argv[])
             (
                 "service",
                 po::value<std::vector<std::string>>()->multitoken()->default_value(std::vector<std::string>{}, ""),
-                "specify modules to run that contain the specified service(s)"
+                "modules to run that contains the service(s) specified"
             )
             (
                 "test",
@@ -439,7 +439,7 @@ int main(int c_argc, char* c_argv[])
             )
             (
                 "aup",
-                po::value<std::vector<std::string>>()->multitoken()->implicit_value({"@../etc/aup.conf.example"}, "@../etc/aup.conf.example"),
+                po::value<std::vector<std::string>>()->multitoken()->implicit_value({"@../etc/aup.conf"}, "@../etc/aup.conf"),
                 "use automatic updates"
             )
             ;
@@ -461,7 +461,7 @@ int main(int c_argc, char* c_argv[])
     ////////////////////////////////////////////////////////////////////////////////
     if(vars.empty() || vars.count("version"))
     {
-        std::cout << "this is a version info" << std::endl;
+        std::cout << dci::integration::info::version() << std::endl;
         return EXIT_SUCCESS;
     }
 
