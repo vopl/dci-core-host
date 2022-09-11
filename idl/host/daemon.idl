@@ -32,9 +32,9 @@ scope host
         out stateChanged(daemon::State);
         out failed(exception);
 
-        in setName(string name) -> void;
-        in start(Config config) -> void;
-        in stop() -> void;
+        in setName(string name) -> none;
+        in start(Config config) -> none;
+        in stop() -> none;
 
         in service() -> interface;
     }

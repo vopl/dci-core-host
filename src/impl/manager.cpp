@@ -211,7 +211,7 @@ namespace dci::host::impl
         {
             {
                 Daemons daemons{std::move(_daemons)};
-                std::vector<cmt::Future<>> stops;
+                std::vector<cmt::Future<None>> stops;
                 stops.reserve(daemons.size());
                 for(auto& daemon : daemons)
                 {
@@ -221,7 +221,7 @@ namespace dci::host::impl
                     }
                 }
 
-                for(const cmt::Future<>& stop : stops)
+                for(const cmt::Future<None>& stop : stops)
                 {
                     stop.wait();
                 }

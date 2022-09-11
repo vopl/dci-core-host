@@ -52,13 +52,13 @@ namespace dci::host
         methods()->setName() += this->sol() * [this](String&& name)
         {
             _name = std::move(name);
-            return cmt::readyFuture<>();
+            return cmt::readyFuture(None{});
         };
 
         //in start(daemon::Params params) -> void;
         methods()->start() += this->sol() * [this](idl::Config&& config)
         {
-            return cmt::spawnv<void>(_toStaring, [this, config=std::move(config)]() mutable
+            return cmt::spawnv<None>(_toStaring, [this, config=std::move(config)]() mutable
             {
                 switch(_state)
                 {
@@ -96,13 +96,15 @@ namespace dci::host
                     _state = idl::host::daemon::State::started;
                     methods()->stateChanged(_state);
                 }
+
+                return None{};
             });
         };
 
         //in stop() -> void;
         methods()->stop() += this->sol() * [this]()
         {
-            return cmt::spawnv<void>(_tol, [this]() mutable
+            return cmt::spawnv<None>(_tol, [this]() mutable
             {
                 _toStaring.flush();
 
@@ -116,6 +118,8 @@ namespace dci::host
                     _state = idl::host::daemon::State::stopped;
                     methods()->stateChanged(_state);
                 }
+
+                return None{};
             });
         };
 
