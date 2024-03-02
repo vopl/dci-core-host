@@ -402,7 +402,7 @@ namespace dci::host::impl
 
         if(_serviceProviders.end() == iter)
         {
-            std::string descr = "ilid not registred: "+ilid.toText();
+            std::string descr = "iid not registred: "+ilid.toIidText();
             return cmt::readyFuture<idl::Interface>(std::make_exception_ptr(exception::UnableToCreateService(std::move(descr))));
         }
 
@@ -415,11 +415,11 @@ namespace dci::host::impl
     cmt::Future<idl::Interface> Manager::createService(const std::string& alias)
     {
         idl::ILid ilid;
-        if(ilid.fromText(alias))
+        if(ilid.fromIidText(alias))
         {
             if(!ilid)
             {
-                std::string descr = "ilid not registred: "+alias;
+                std::string descr = "iid not registred: "+alias;
                 return cmt::readyFuture<idl::Interface>(std::make_exception_ptr(exception::UnableToCreateService(std::move(descr))));
             }
             return createService(ilid);
